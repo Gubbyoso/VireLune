@@ -1,0 +1,1448 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local AnimationsFolder = ReplicatedStorage:FindFirstChild("Animations")
+local SequenceRemote = ReplicatedStorage:FindFirstChild("VireLuneSequenceRemote")
+local MAX_SEQUENCES = 8
+local playSequenceFE
+local LeftPanel
+local RightPanel
+
+local StudioState = {
+    Characters = {},
+    CurrentCharacter = nil,
+    CurrentAnimSelected = nil,
+    Overrides = {},
+    EditorConnections = {},
+    Camera = {
+        Yaw = math.pi,
+        Pitch = 0.2,
+        Distance = 7,
+        Dragging = false,
+        Hovered = false,
+        LastMouse = nil,
+        Target = Vector3.new(0, 2, 0)
+    },
+    IsHidden = false,
+    SaveFileName = "VireLuneSaves.json",
+    SaveProfiles = {},
+    SelectedSaveName = nil
+}
+
+local function getOverride(origId)
+    if not StudioState.Overrides[origId] then
+        StudioState.Overrides[origId] = { GameId = origId, DashEnabled = false, DashSpeed = 50 }
+    end
+    local target = StudioState.Overrides[origId]
+    for i = 1, MAX_SEQUENCES do
+        target["Anim"..i] = target["Anim"..i] or ""
+        target["Time"..i] = tonumber(target["Time"..i]) or 0
+        target["End"..i] = tonumber(target["End"..i]) or 0
+        target["Speed"..i] = tonumber(target["Speed"..i]) or 1
+        target["Length"..i] = tonumber(target["Length"..i]) or 0
+        target["Reverse"..i] = target["Reverse"..i] == true
+        target["FadeIn"..i] = tonumber(target["FadeIn"..i]) or 0.08
+        target["FadeOut"..i] = tonumber(target["FadeOut"..i]) or 0.08
+    end
+    return target
+end
+
+local function normalizeOverride(k, cfg)
+    local normalized = getOverride(k)
+    for key, value in pairs(cfg or {}) do
+        normalized[key] = value
+    end
+    normalized.GameId = normalized.GameId or k
+    normalized.DashEnabled = normalized.DashEnabled == true
+    normalized.DashSpeed = tonumber(normalized.DashSpeed) or 50
+    for i = 1, MAX_SEQUENCES do
+        normalized["Anim"..i] = normalized["Anim"..i] or ""
+        normalized["Time"..i] = tonumber(normalized["Time"..i]) or 0
+        normalized["End"..i] = tonumber(normalized["End"..i]) or 0
+        normalized["Length"..i] = tonumber(normalized["Length"..i]) or 0
+        normalized["Speed"..i] = tonumber(normalized["Speed"..i]) or 1
+        normalized["FadeIn"..i] = tonumber(normalized["FadeIn"..i]) or 0.08
+        normalized["FadeOut"..i] = tonumber(normalized["FadeOut"..i]) or 0.08
+        normalized["Reverse"..i] = normalized["Reverse"..i] == true
+    end
+    return normalized
+end
+
+local function parseAnimations()
+    if not AnimationsFolder then warn("No Animations folder found in ReplicatedStorage!") return end
+    
+    for _, charFolder in ipairs(AnimationsFolder:GetChildren()) do
+        if charFolder:IsA("Folder") and charFolder.Name ~= "Misc" then
+            local charData = { Melee = {}, Skills = {}, Ults = {} }
+            
+            for _, sub in ipairs(charFolder:GetDescendants()) do
+                if sub:IsA("Animation") then
+                    local cat = "Skills"
+                    local parentName = sub.Parent and sub.Parent.Name:lower() or ""
+                    local subName = sub.Name:lower()
+                    
+                    if string.find(parentName, "melee") or string.find(subName, "melee") then
+                        cat = "Melee"
+                    elseif string.find(parentName, "ult") or string.find(subName, "ult") or string.find(parentName, "awakening") then
+                        cat = "Ults"
+                    end
+                    
+                    table.insert(charData[cat], {
+                        Name = sub.Name,
+                        Id = string.match(tostring(sub.AnimationId), "%d+") or sub.AnimationId,
+                        Instance = sub
+                    })
+                end
+            end
+            
+            table.sort(charData.Melee, function(a,b) return a.Name < b.Name end)
+            table.sort(charData.Skills, function(a,b) return a.Name < b.Name end)
+            table.sort(charData.Ults, function(a,b) return a.Name < b.Name end)
+            
+            StudioState.Characters[charFolder.Name] = charData
+        end
+    end
+end
+
+parseAnimations()
+
+local function create(className, props)
+    local inst = Instance.new(className)
+    for k, v in pairs(props) do
+        if k ~= "Parent" then
+            inst[k] = v
+        end
+    end
+    if props.Parent then inst.Parent = props.Parent end
+    return inst
+end
+
+local function styleCard(frame, radius)
+    create("UICorner", { Parent = frame, CornerRadius = UDim.new(0, radius or 8) })
+    create("UIStroke", { Parent = frame, Color = Color3.fromRGB(95, 95, 95), Thickness = 1, Transparency = 0.35 })
+end
+
+local function styleButton(btn, baseColor, hoverColor)
+    create("UICorner", { Parent = btn, CornerRadius = UDim.new(0, 6) })
+    btn.AutoButtonColor = false
+    btn.BackgroundColor3 = baseColor
+    local hoverTweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local scale = btn:FindFirstChildOfClass("UIScale") or create("UIScale", { Parent = btn, Scale = 1 })
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, hoverTweenInfo, { BackgroundColor3 = hoverColor }):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, hoverTweenInfo, { BackgroundColor3 = baseColor }):Play()
+    end)
+    btn.MouseButton1Down:Connect(function()
+        TweenService:Create(scale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.97 }):Play()
+    end)
+    btn.MouseButton1Up:Connect(function()
+        TweenService:Create(scale, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+    end)
+end
+
+local function deepCopyTable(input)
+    if type(input) ~= "table" then
+        return input
+    end
+    local output = {}
+    for k, v in pairs(input) do
+        output[k] = deepCopyTable(v)
+    end
+    return output
+end
+
+local function getAnimatorFromModel(model)
+    if not model then return nil end
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        return humanoid:FindFirstChildOfClass("Animator") or humanoid
+    end
+
+    local controller = model:FindFirstChildOfClass("AnimationController")
+    if not controller then
+        controller = Instance.new("AnimationController")
+        controller.Parent = model
+    end
+    return controller:FindFirstChildOfClass("Animator") or controller
+end
+
+local function readSavesFromDisk()
+    if not readfile then
+        return {}
+    end
+    local ok, content = pcall(function()
+        return readfile(StudioState.SaveFileName)
+    end)
+    if not ok or not content or content == "" then
+        return {}
+    end
+    local decodeOk, decoded = pcall(function()
+        return HttpService:JSONDecode(content)
+    end)
+    if not decodeOk or type(decoded) ~= "table" then
+        return {}
+    end
+    return decoded
+end
+
+local function writeSavesToDisk()
+    if not writefile then
+        return false
+    end
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(StudioState.SaveProfiles)
+    end)
+    if not ok then
+        return false
+    end
+    local writeOk = pcall(function()
+        writefile(StudioState.SaveFileName, encoded)
+    end)
+    return writeOk
+end
+
+local V4Gui = create("ScreenGui", {
+    Name = "AntigravityStudioV4",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    Parent = CoreGui
+})
+
+local MainFrame = create("Frame", {
+    Size = UDim2.new(0, 1020, 0, 720),
+    Position = UDim2.new(0.5, -510, 0.5, -360),
+    BackgroundColor3 = Color3.fromRGB(12, 12, 12),
+    BorderSizePixel = 0,
+    Active = true,
+    Draggable = false,
+    Parent = V4Gui
+})
+styleCard(MainFrame, 10)
+local MainScale = create("UIScale", { Parent = MainFrame, Scale = 1 })
+
+local TitleBar = create("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 44),
+    BackgroundColor3 = Color3.fromRGB(18, 18, 18),
+    TextColor3 = Color3.new(1,1,1),
+    Text = "  VireLune",
+    Font = Enum.Font.GothamBold,
+    TextSize = 18,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = MainFrame
+})
+styleCard(TitleBar, 10)
+
+do
+    local dragging = false
+    local dragStart
+    local startPos
+    TitleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = MainFrame.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            MainFrame.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+end
+
+local function setStudioHidden(hidden)
+    if StudioState.IsHidden == hidden then
+        return
+    end
+    StudioState.IsHidden = hidden
+    if hidden then
+        local outTween = TweenService:Create(MainScale, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Scale = 0.86
+        })
+        outTween:Play()
+        outTween.Completed:Wait()
+        MainFrame.Visible = false
+        MainScale.Scale = 1
+    else
+        MainFrame.Visible = true
+        MainScale.Scale = 0.86
+        TweenService:Create(MainScale, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Scale = 1
+        }):Play()
+    end
+end
+
+local CloseBtn = create("TextButton", {
+    Size = UDim2.new(0, 36, 0, 36),
+    Position = UDim2.new(1, -40, 0, 4),
+    BackgroundTransparency = 1,
+    Text = "X",
+    TextColor3 = Color3.new(1,0.3,0.3),
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    Parent = TitleBar
+})
+CloseBtn.MouseButton1Click:Connect(function()
+    setStudioHidden(true)
+end)
+styleButton(CloseBtn, Color3.fromRGB(25, 25, 25), Color3.fromRGB(60, 60, 60))
+
+local MinBtn = create("TextButton", {
+    Size = UDim2.new(0, 36, 0, 36),
+    Position = UDim2.new(1, -80, 0, 4),
+    BackgroundTransparency = 1,
+    Text = "-",
+    TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 18,
+    Parent = TitleBar
+})
+styleButton(MinBtn, Color3.fromRGB(25, 25, 25), Color3.fromRGB(60, 60, 60))
+
+local ExportBtn = create("TextButton", {
+    Size = UDim2.new(0, 180, 0, 34),
+    Position = UDim2.new(1, -280, 0, 5),
+    BackgroundColor3 = Color3.fromRGB(50, 150, 70),
+    Text = "Export to Clipboard",
+    TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = TitleBar
+})
+styleButton(ExportBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+ExportBtn.MouseButton1Click:Connect(function()
+    local count = 0
+    local exportPayload = {}
+    for k, v in pairs(StudioState.Overrides) do
+        if v.Anim1 and v.Anim1 ~= "" then
+            exportPayload[k] = deepCopyTable(v)
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        local encoded = HttpService:JSONEncode(exportPayload)
+        pcall(function() setclipboard(encoded) end)
+        ExportBtn.Text = "Copied!"
+        task.delay(2, function() ExportBtn.Text = "Export to Clipboard" end)
+    else
+        ExportBtn.Text = "Nothing to save!"
+        ExportBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        task.delay(2, function() ExportBtn.Text = "Export to Clipboard" ExportBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28) end)
+    end
+end)
+
+local ImportBtn = create("TextButton", {
+    Size = UDim2.new(0, 180, 0, 34),
+    Position = UDim2.new(1, -470, 0, 5),
+    BackgroundColor3 = Color3.fromRGB(150, 100, 50),
+    Text = "Import Settings",
+    TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = TitleBar
+})
+styleButton(ImportBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+local ImportFrame = create("Frame", {
+    Size = UDim2.new(0, 500, 0, 350),
+    Position = UDim2.new(0.5, -250, 0.5, -175),
+    BackgroundColor3 = Color3.fromRGB(14, 14, 14),
+    Visible = false,
+    ZIndex = 10,
+    Parent = MainFrame
+})
+styleCard(ImportFrame, 8)
+
+local ImportTitle = create("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 30),
+    BackgroundTransparency = 1,
+    Text = "  Paste Exported Configuration Array",
+    TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = ImportFrame
+})
+
+local ImportClose = create("TextButton", {
+    Size = UDim2.new(0, 30, 0, 30),
+    Position = UDim2.new(1, -30, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "X",
+    TextColor3 = Color3.new(1, 0.3, 0.3),
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    Parent = ImportFrame
+})
+ImportClose.MouseButton1Click:Connect(function()
+    local tween = TweenService:Create(ImportFrame, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0.35
+    })
+    tween:Play()
+    tween.Completed:Wait()
+    ImportFrame.Visible = false
+end)
+
+local ImportBox = create("TextBox", {
+    Size = UDim2.new(1, -20, 1, -80),
+    Position = UDim2.new(0, 10, 0, 35),
+    BackgroundColor3 = Color3.fromRGB(9, 9, 9),
+    TextColor3 = Color3.new(0.8, 0.8, 0.8),
+    Font = Enum.Font.Code,
+    TextSize = 11,
+    Text = "",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    ClearTextOnFocus = false,
+    TextWrapped = true,
+    MultiLine = true,
+    Parent = ImportFrame
+})
+create("UICorner", {Parent = ImportBox, CornerRadius = UDim.new(0, 4)})
+
+local ApplyImportBtn = create("TextButton", {
+    Size = UDim2.new(0, 150, 0, 30),
+    Position = UDim2.new(0.5, -75, 1, -40),
+    BackgroundColor3 = Color3.fromRGB(50, 150, 70),
+    Text = "Apply Import",
+    TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = ImportFrame
+})
+styleButton(ApplyImportBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+ImportBtn.MouseButton1Click:Connect(function()
+    ImportFrame.BackgroundTransparency = 0.35
+    ImportFrame.Visible = true
+    TweenService:Create(ImportFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        BackgroundTransparency = 0
+    }):Play()
+end)
+
+ApplyImportBtn.MouseButton1Click:Connect(function()
+    local clip = ImportBox.Text
+    if not clip or clip == "" then
+        ApplyImportBtn.Text = "No Text Found!"
+        task.delay(2, function() ApplyImportBtn.Text = "Apply Import" end)
+        return
+    end
+
+    local count = 0
+    local decodedOk, decoded = pcall(function()
+        return HttpService:JSONDecode(clip)
+    end)
+    if decodedOk and type(decoded) == "table" then
+        for k, cfg in pairs(decoded) do
+            StudioState.Overrides[k] = normalizeOverride(k, cfg)
+            count = count + 1
+        end
+    end
+
+    if count == 0 then
+        local pattern = '%["(.-)"%] = { GameId = "(.-)", Anim1 = "(.-)", Time1 = (.-), Length1 = (.-), Speed1 = (.-), Anim2 = "(.-)", Time2 = (.-), Length2 = (.-), Speed2 = (.-), Anim3 = "(.-)", Time3 = (.-), Length3 = (.-), Speed3 = (.-), DashEnabled = (.-), DashSpeed = (.-) }'
+        for k, GameId, Anim1, Time1, Length1, Speed1, Anim2, Time2, Length2, Speed2, Anim3, Time3, Length3, Speed3, DashEnabled, DashSpeed in string.gmatch(clip, pattern) do
+            StudioState.Overrides[k] = normalizeOverride(k, {
+                GameId = GameId,
+                Anim1 = Anim1, Time1 = tonumber(Time1) or 0, Length1 = tonumber(Length1) or 0, Speed1 = tonumber(Speed1) or 1,
+                Anim2 = Anim2, Time2 = tonumber(Time2) or 0, Length2 = tonumber(Length2) or 0, Speed2 = tonumber(Speed2) or 1,
+                Anim3 = Anim3, Time3 = tonumber(Time3) or 0, Length3 = tonumber(Length3) or 0, Speed3 = tonumber(Speed3) or 1,
+                DashEnabled = (DashEnabled == "true"), DashSpeed = tonumber(DashSpeed) or 50
+            })
+            count = count + 1
+        end
+    end
+    
+    if count > 0 then
+        ApplyImportBtn.Text = "Imported " .. count .. "!"
+        if StudioState.CurrentCharacter then
+            loadSidebar(StudioState.CurrentCharacter)
+            for _, v in ipairs(EditorContainer:GetChildren()) do
+                if not v:IsA("UIListLayout") then v:Destroy() end
+            end
+            StudioState.CurrentAnimSelected = nil
+        end
+        task.delay(1, function()
+            local tween = TweenService:Create(ImportFrame, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                BackgroundTransparency = 0.35
+            })
+            tween:Play()
+            tween.Completed:Wait()
+            ImportFrame.Visible = false
+            ApplyImportBtn.Text = "Apply Import"
+        end)
+    else
+        ApplyImportBtn.Text = "Invalid Format!"
+        ApplyImportBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        task.delay(2, function() ApplyImportBtn.Text = "Apply Import"; ApplyImportBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28) end)
+    end
+end)
+
+local minimized = false
+local savedSize = MainFrame.Size
+local savedRightVisible = true
+local savedLeftVisible = true
+MinBtn.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    if minimized then
+        savedSize = MainFrame.Size
+        savedRightVisible = RightPanel.Visible
+        savedLeftVisible = LeftPanel.Visible
+        RightPanel.Visible = false
+        LeftPanel.Visible = false
+        TweenService:Create(MainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = UDim2.new(savedSize.X.Scale, savedSize.X.Offset, 0, 44)
+        }):Play()
+    else
+        local tween = TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Size = savedSize
+        })
+        tween:Play()
+        RightPanel.Visible = savedRightVisible
+        LeftPanel.Visible = savedLeftVisible
+    end
+end)
+
+LeftPanel = create("ScrollingFrame", {
+    Size = UDim2.new(0, 250, 1, -44),
+    Position = UDim2.new(0, 0, 0, 44),
+    BackgroundColor3 = Color3.fromRGB(15, 15, 20),
+    ScrollBarThickness = 4,
+    Parent = MainFrame
+})
+create("UIListLayout", {Parent = LeftPanel, SortOrder = Enum.SortOrder.LayoutOrder})
+styleCard(LeftPanel, 8)
+
+RightPanel = create("Frame", {
+    Size = UDim2.new(1, -250, 1, -44),
+    Position = UDim2.new(0, 250, 0, 44),
+    BackgroundTransparency = 1,
+    Parent = MainFrame
+})
+
+local CharContainer = create("ScrollingFrame", {
+    Size = UDim2.new(1, -20, 0, 35),
+    Position = UDim2.new(0, 10, 0, 5),
+    BackgroundColor3 = Color3.fromRGB(15, 15, 20),
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.X,
+    ScrollBarThickness = 4,
+    Parent = RightPanel
+})
+create("UIListLayout", {Parent = CharContainer, FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5)})
+styleCard(CharContainer, 8)
+
+local SavesPanel = create("Frame", {
+    Size = UDim2.new(1, -20, 0, 124),
+    Position = UDim2.new(0, 10, 0, 45),
+    BackgroundColor3 = Color3.fromRGB(15, 15, 15),
+    Parent = RightPanel
+})
+styleCard(SavesPanel, 8)
+
+local SavesTitle = create("TextLabel", {
+    Size = UDim2.new(1, -10, 0, 20),
+    Position = UDim2.new(0, 10, 0, 4),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Saves",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = SavesPanel
+})
+
+local SaveNameBox = create("TextBox", {
+    Size = UDim2.new(0.4, -8, 0, 26),
+    Position = UDim2.new(0, 8, 0, 26),
+    BackgroundColor3 = Color3.fromRGB(24, 24, 24),
+    TextColor3 = Color3.new(1, 1, 1),
+    PlaceholderText = "Save name",
+    Text = "",
+    Font = Enum.Font.Gotham,
+    TextSize = 12,
+    Parent = SavesPanel
+})
+styleCard(SaveNameBox, 6)
+
+local SaveCurrentBtn = create("TextButton", {
+    Size = UDim2.new(0.2, -6, 0, 26),
+    Position = UDim2.new(0.4, 2, 0, 26),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Save",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = SavesPanel
+})
+styleButton(SaveCurrentBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+local LoadSaveBtn = create("TextButton", {
+    Size = UDim2.new(0.2, -6, 0, 26),
+    Position = UDim2.new(0.6, 4, 0, 26),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Load",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = SavesPanel
+})
+styleButton(LoadSaveBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+local RenameSaveBtn = create("TextButton", {
+    Size = UDim2.new(0.2, -6, 0, 26),
+    Position = UDim2.new(0.8, 6, 0, 26),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Rename",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = SavesPanel
+})
+styleButton(RenameSaveBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+local SavesList = create("ScrollingFrame", {
+    Size = UDim2.new(1, -90, 0, 34),
+    Position = UDim2.new(0, 8, 0, 86),
+    BackgroundColor3 = Color3.fromRGB(10, 10, 10),
+    ScrollBarThickness = 2,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.X,
+    Parent = SavesPanel
+})
+styleCard(SavesList, 6)
+create("UIListLayout", { Parent = SavesList, FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4) })
+
+local DeleteSaveBtn = create("TextButton", {
+    Size = UDim2.new(0, 66, 0, 34),
+    Position = UDim2.new(1, -74, 0, 86),
+    BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+    TextColor3 = Color3.new(1, 1, 1),
+    Text = "Delete",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    Parent = SavesPanel
+})
+styleButton(DeleteSaveBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+local function buildCharSelector()
+    for charName, _ in pairs(StudioState.Characters) do
+        local b = create("TextButton", {
+            Size = UDim2.new(0, 138, 1, -4),
+            TextColor3 = Color3.new(1,1,1),
+            Text = charName,
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            Parent = CharContainer
+        })
+        styleButton(b, Color3.fromRGB(30, 30, 30), Color3.fromRGB(55, 55, 55))
+        b.MouseButton1Click:Connect(function()
+            StudioState.CurrentCharacter = charName
+            loadSidebar(charName)
+        end)
+    end
+end
+buildCharSelector()
+
+local Viewport = create("ViewportFrame", {
+    Size = UDim2.new(1, -20, 0, 250),
+    Position = UDim2.new(0, 10, 0, 175),
+    BackgroundColor3 = Color3.fromRGB(10, 10, 15),
+    Parent = RightPanel
+})
+styleCard(Viewport, 8)
+local VP_Camera = create("Camera", {Parent = Viewport})
+Viewport.CurrentCamera = VP_Camera
+local World = create("WorldModel", {Parent = Viewport})
+local CameraHint = create("TextLabel", {
+    Size = UDim2.new(1, -10, 0, 20),
+    Position = UDim2.new(0, 5, 1, -24),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(190, 190, 205),
+    Text = "Drag to rotate | Mouse wheel to zoom",
+    Font = Enum.Font.Gotham,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Parent = Viewport
+})
+
+local EditorContainer = create("ScrollingFrame", {
+    Size = UDim2.new(1, -20, 1, -445),
+    Position = UDim2.new(0, 10, 0, 435),
+    BackgroundTransparency = 1,
+    ScrollBarThickness = 4,
+    Parent = RightPanel
+})
+local EditorListLayout = create("UIListLayout", {Parent = EditorContainer, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 10)})
+
+local function updatePreviewCamera()
+    local cam = StudioState.Camera
+    local offset = Vector3.new(
+        math.cos(cam.Pitch) * math.sin(cam.Yaw),
+        math.sin(cam.Pitch),
+        math.cos(cam.Pitch) * math.cos(cam.Yaw)
+    ) * cam.Distance
+    VP_Camera.CFrame = CFrame.lookAt(cam.Target + offset, cam.Target)
+end
+
+Viewport.MouseEnter:Connect(function()
+    StudioState.Camera.Hovered = true
+end)
+Viewport.MouseLeave:Connect(function()
+    StudioState.Camera.Hovered = false
+    StudioState.Camera.Dragging = false
+end)
+
+UserInputService.InputBegan:Connect(function(input)
+    if not StudioState.Camera.Hovered then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        StudioState.Camera.Dragging = true
+        StudioState.Camera.LastMouse = input.Position
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if not StudioState.Camera.Hovered then return end
+
+    if input.UserInputType == Enum.UserInputType.MouseMovement and StudioState.Camera.Dragging then
+        local last = StudioState.Camera.LastMouse
+        if last then
+            local delta = input.Position - last
+            StudioState.Camera.Yaw = StudioState.Camera.Yaw - delta.X * 0.01
+            StudioState.Camera.Pitch = math.clamp(StudioState.Camera.Pitch + delta.Y * 0.008, -1.2, 1.2)
+            updatePreviewCamera()
+        end
+        StudioState.Camera.LastMouse = input.Position
+    elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+        StudioState.Camera.Distance = math.clamp(StudioState.Camera.Distance - (input.Position.Z * 1.2), 3, 16)
+        updatePreviewCamera()
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        StudioState.Camera.Dragging = false
+        StudioState.Camera.LastMouse = nil
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if UserInputService:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.RightAlt then
+        setStudioHidden(not StudioState.IsHidden)
+    end
+end)
+
+local function createHeader(text, parent)
+    create("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 25),
+        BackgroundColor3 = Color3.fromRGB(20,20,20),
+        TextColor3 = Color3.new(1,1,1),
+        Text = "  " .. text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = parent
+    })
+end
+
+local function buildAnimButton(data, parent)
+    local btn = create("TextButton", {
+        Size = UDim2.new(1, 0, 0, 40),
+        TextColor3 = Color3.new(0.9,0.9,0.9),
+        Text = "  " .. data.Name,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = parent
+    })
+    styleButton(btn, Color3.fromRGB(20, 20, 20), Color3.fromRGB(42, 42, 42))
+    btn.MouseButton1Click:Connect(function()
+        StudioState.CurrentAnimSelected = data.Id
+        loadEditorPanel(data)
+    end)
+end
+
+function loadSidebar(charName)
+    if not StudioState.Characters[charName] then return end
+
+    for _, v in ipairs(LeftPanel:GetChildren()) do
+        if v:IsA("TextLabel") or v:IsA("TextButton") then v:Destroy() end
+    end
+    
+    local cData = StudioState.Characters[charName]
+    
+    createHeader("--- MELEE ---", LeftPanel)
+    for _, anim in ipairs(cData.Melee) do buildAnimButton(anim, LeftPanel) end
+    
+    createHeader("--- SKILLS ---", LeftPanel)
+    for _, anim in ipairs(cData.Skills) do buildAnimButton(anim, LeftPanel) end
+    
+    createHeader("--- ULTS ---", LeftPanel)
+    for _, anim in ipairs(cData.Ults) do buildAnimButton(anim, LeftPanel) end
+end
+
+local function clearEditorPanel()
+    for _, v in ipairs(EditorContainer:GetChildren()) do
+        if not v:IsA("UIListLayout") then
+            v:Destroy()
+        end
+    end
+    StudioState.CurrentAnimSelected = nil
+end
+
+local function refreshSavesList()
+    for _, child in ipairs(SavesList:GetChildren()) do
+        if not child:IsA("UIListLayout") then
+            child:Destroy()
+        end
+    end
+
+    local names = {}
+    for name in pairs(StudioState.SaveProfiles) do
+        table.insert(names, name)
+    end
+    table.sort(names)
+
+    for _, name in ipairs(names) do
+        local entry = create("TextButton", {
+            Size = UDim2.new(0, 150, 1, -4),
+            BackgroundColor3 = Color3.fromRGB(24, 24, 24),
+            TextColor3 = Color3.new(1, 1, 1),
+            Text = name,
+            Font = Enum.Font.Gotham,
+            TextSize = 12,
+            Parent = SavesList
+        })
+        if StudioState.SelectedSaveName == name then
+            entry.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        end
+        styleButton(entry, entry.BackgroundColor3, Color3.fromRGB(62, 62, 62))
+        entry.MouseButton1Click:Connect(function()
+            StudioState.SelectedSaveName = name
+            SaveNameBox.Text = name
+            refreshSavesList()
+        end)
+    end
+end
+
+local function saveCurrentProfile(name)
+    if not name or name == "" then
+        return false
+    end
+    StudioState.SaveProfiles[name] = {
+        Overrides = deepCopyTable(StudioState.Overrides),
+        SavedAt = os.time()
+    }
+    StudioState.SelectedSaveName = name
+    writeSavesToDisk()
+    refreshSavesList()
+    return true
+end
+
+local function loadProfile(name)
+    local profile = StudioState.SaveProfiles[name]
+    if not profile then
+        return false
+    end
+    StudioState.Overrides = {}
+    for k, cfg in pairs(profile.Overrides or {}) do
+        StudioState.Overrides[k] = normalizeOverride(k, deepCopyTable(cfg))
+    end
+    StudioState.SelectedSaveName = name
+    if StudioState.CurrentCharacter then
+        loadSidebar(StudioState.CurrentCharacter)
+        clearEditorPanel()
+    end
+    refreshSavesList()
+    return true
+end
+
+SaveCurrentBtn.MouseButton1Click:Connect(function()
+    local name = SaveNameBox.Text
+    if saveCurrentProfile(name) then
+        SaveCurrentBtn.Text = "Saved"
+        task.delay(1, function() SaveCurrentBtn.Text = "Save" end)
+    else
+        SaveCurrentBtn.Text = "Name?"
+        task.delay(1, function() SaveCurrentBtn.Text = "Save" end)
+    end
+end)
+
+LoadSaveBtn.MouseButton1Click:Connect(function()
+    local name = StudioState.SelectedSaveName or SaveNameBox.Text
+    if loadProfile(name) then
+        LoadSaveBtn.Text = "Loaded"
+        task.delay(1, function() LoadSaveBtn.Text = "Load" end)
+    else
+        LoadSaveBtn.Text = "Not Found"
+        task.delay(1, function() LoadSaveBtn.Text = "Load" end)
+    end
+end)
+
+RenameSaveBtn.MouseButton1Click:Connect(function()
+    local oldName = StudioState.SelectedSaveName
+    local newName = SaveNameBox.Text
+    if oldName and newName ~= "" and StudioState.SaveProfiles[oldName] then
+        StudioState.SaveProfiles[newName] = StudioState.SaveProfiles[oldName]
+        if newName ~= oldName then
+            StudioState.SaveProfiles[oldName] = nil
+        end
+        StudioState.SelectedSaveName = newName
+        writeSavesToDisk()
+        refreshSavesList()
+        RenameSaveBtn.Text = "Renamed"
+        task.delay(1, function() RenameSaveBtn.Text = "Rename" end)
+    else
+        RenameSaveBtn.Text = "Select Save"
+        task.delay(1, function() RenameSaveBtn.Text = "Rename" end)
+    end
+end)
+
+DeleteSaveBtn.MouseButton1Click:Connect(function()
+    local name = StudioState.SelectedSaveName
+    if name and StudioState.SaveProfiles[name] then
+        StudioState.SaveProfiles[name] = nil
+        StudioState.SelectedSaveName = nil
+        SaveNameBox.Text = ""
+        writeSavesToDisk()
+        refreshSavesList()
+        DeleteSaveBtn.Text = "Deleted"
+        task.delay(1, function() DeleteSaveBtn.Text = "Delete" end)
+    else
+        DeleteSaveBtn.Text = "Select"
+        task.delay(1, function() DeleteSaveBtn.Text = "Delete" end)
+    end
+end)
+
+StudioState.SaveProfiles = readSavesFromDisk()
+if StudioState.SaveProfiles.Autosave and StudioState.SaveProfiles.Autosave.Overrides then
+    StudioState.Overrides = {}
+    for k, cfg in pairs(StudioState.SaveProfiles.Autosave.Overrides) do
+        StudioState.Overrides[k] = normalizeOverride(k, deepCopyTable(cfg))
+    end
+end
+refreshSavesList()
+
+task.spawn(function()
+    while V4Gui.Parent do
+        StudioState.SaveProfiles.Autosave = {
+            Overrides = deepCopyTable(StudioState.Overrides),
+            SavedAt = os.time(),
+            Auto = true
+        }
+        writeSavesToDisk()
+        task.wait(10)
+    end
+end)
+
+local function refreshCharacterState()
+    local char = LocalPlayer.Character
+    if not char then return end
+    local name = char.Name
+    
+    if not StudioState.Characters[name] then
+        for k, _ in pairs(StudioState.Characters) do name = k break end
+    end
+    
+    if StudioState.Characters[name] then
+        StudioState.CurrentCharacter = name
+        loadSidebar(name)
+        
+        World:ClearAllChildren()
+        char.Archivable = true
+        local dummy = char:Clone()
+
+        for _,v in ipairs(dummy:GetDescendants()) do
+            if v:IsA("Script") or v:IsA("LocalScript") then v:Destroy() end
+        end
+        
+        dummy.Parent = World
+        local hrp = dummy:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            if dummy.PrimaryPart then
+                dummy:SetPrimaryPartCFrame(CFrame.new(0,0,0))
+            else
+                hrp.CFrame = CFrame.new(0,0,0)
+            end
+            StudioState.Camera.Target = hrp.Position + Vector3.new(0, 2, 0)
+            updatePreviewCamera()
+        end
+    end
+end
+
+if LocalPlayer.Character then refreshCharacterState() end
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1)
+    refreshCharacterState()
+end)
+
+function loadEditorPanel(animData)
+    for _, conn in ipairs(StudioState.EditorConnections) do
+        conn:Disconnect()
+    end
+    StudioState.EditorConnections = {}
+
+    for _, v in ipairs(EditorContainer:GetChildren()) do
+        if not v:IsA("UIListLayout") then v:Destroy() end
+    end
+    
+    local origId = animData.Id
+    local config = getOverride(origId)
+    
+    createHeader("Sequence Configuration: " .. animData.Name, EditorContainer)
+    
+    local function createField(label, placeholder, defaultVal, callback)
+        local f = create("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = EditorContainer })
+        create("TextLabel", { Size = UDim2.new(0.4, 0, 1, 0), BackgroundTransparency = 1, TextColor3 = Color3.new(1,1,1), Text = label, Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, Parent = f})
+        local box = create("TextBox", { Size = UDim2.new(0.6, 0, 1, 0), Position = UDim2.new(0.4, 0, 0, 0), BackgroundColor3 = Color3.fromRGB(30,30,35), TextColor3 = Color3.new(1,1,1), PlaceholderText = placeholder, Text = tostring(defaultVal), Font = Enum.Font.Gotham, Parent = f})
+        styleCard(box, 5)
+        box.FocusLost:Connect(function() callback(box.Text) end)
+        return box
+    end
+
+    local function createTimeline(seqIndex)
+        local fLabel = create("TextLabel", {Size = UDim2.new(1,0,0,20), BackgroundTransparency = 1, TextColor3 = Color3.new(0.7,0.8,1), Text = string.format("--- Sequence %d Timeline ---", seqIndex), Font = Enum.Font.GothamBold, Parent = EditorContainer})
+
+        createField("Override Asset ID", "rbxassetid://...", config["Anim"..seqIndex], function(t)
+            if string.match(t, "^%d+$") then t = "rbxassetid://" .. t end
+            config["Anim"..seqIndex] = t
+        end)
+
+        local TLContainer = create("Frame", { Size = UDim2.new(1, 0, 0, 72), BackgroundTransparency = 1, Parent = EditorContainer})
+        local laneMin = 0.05
+        local laneSize = 0.9
+        local function makeKnob(color)
+            local k = create("TextButton", {Size = UDim2.new(0, 16, 0, 16), AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = color, Text = "", Parent = TLContainer})
+            create("UICorner", {CornerRadius = UDim.new(1,0), Parent = k})
+            return k
+        end
+        
+        local ConnectLine = create("Frame", {
+            Size = UDim2.new(0, 0, 0, 2),
+            Position = UDim2.new(laneMin, 0, 0, 18),
+            BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+            BorderSizePixel = 0,
+            Parent = TLContainer
+        })
+        local StartKnob = makeKnob(Color3.fromRGB(255, 255, 255))
+        local EndKnob = makeKnob(Color3.fromRGB(255, 255, 255))
+        
+        local TimeInfo = create("TextLabel", { Size = UDim2.new(1, 0, 0, 15), Position = UDim2.new(0, 0, 0, 38), BackgroundTransparency = 1, TextColor3 = Color3.new(0.8,0.8,0.8), Text = "Start: 0.00s | End: 0.00s", Font = Enum.Font.Gotham, TextSize = 10, Parent = TLContainer })
+
+        local dragging = nil
+        local currentPreviewTrack = nil
+        local totalLength = 5
+        local function updateSliders()
+            local sX = (StartKnob.Position.X.Scale - laneMin) / laneSize
+            local eX = (EndKnob.Position.X.Scale - laneMin) / laneSize
+            if sX > eX then sX, eX = eX, sX end
+            local calculatedStart = sX * totalLength
+            local calculatedLength = (eX - sX) * totalLength
+
+            local startX = laneMin + (sX * laneSize)
+            local endX = laneMin + (eX * laneSize)
+            ConnectLine.Position = UDim2.new(startX, 0, 0, 18)
+            ConnectLine.Size = UDim2.new(math.max(endX - startX, 0), 0, 0, 2)
+            
+            config["Time"..seqIndex] = math.floor(calculatedStart*100)/100
+            config["Length"..seqIndex] = math.floor(calculatedLength*100)/100
+            config["End"..seqIndex] = math.floor((calculatedStart + calculatedLength)*100)/100
+            TimeInfo.Text = string.format("Start: %.2fs | End: %.2fs", config["Time"..seqIndex], config["End"..seqIndex])
+        end
+        
+        local function initializeKnobs()
+            local storedTime = config["Time"..seqIndex] or 0
+            local storedLen = config["Length"..seqIndex] or 0
+            local sScale = storedTime / totalLength
+            local eScale = sScale
+            if storedLen == 0 then
+                eScale = 1
+            else
+                eScale = (storedTime + storedLen) / totalLength
+            end
+            
+            StartKnob.Position = UDim2.new(laneMin + (math.clamp(sScale,0,1) * laneSize),0,0,18)
+            EndKnob.Position = UDim2.new(laneMin + (math.clamp(eScale,0,1) * laneSize),0,0,18)
+            updateSliders()
+        end
+        initializeKnobs()
+        
+        local function bindDrag(knob)
+            knob.MouseButton1Down:Connect(function() dragging = knob end)
+        end
+        bindDrag(StartKnob); bindDrag(EndKnob)
+        
+        table.insert(StudioState.EditorConnections, UserInputService.InputChanged:Connect(function(input)
+            if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                local relativeX = math.clamp((input.Position.X - TLContainer.AbsolutePosition.X) / TLContainer.AbsoluteSize.X, laneMin, laneMin + laneSize)
+                dragging.Position = UDim2.new(relativeX, 0, 0, 18)
+                updateSliders()
+            end
+        end))
+        table.insert(StudioState.EditorConnections, UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = nil end
+        end))
+
+        local mainFields = create("Frame", { Size = UDim2.new(1, 0, 0, 1), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = EditorContainer })
+        local function createMainField(label, placeholder, defaultVal, callback)
+            local f = create("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = mainFields })
+            create("TextLabel", { Size = UDim2.new(0.4, 0, 1, 0), BackgroundTransparency = 1, TextColor3 = Color3.new(1,1,1), Text = label, Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, Parent = f})
+            local box = create("TextBox", { Size = UDim2.new(0.6, 0, 1, 0), Position = UDim2.new(0.4, 0, 0, 0), BackgroundColor3 = Color3.fromRGB(30,30,35), TextColor3 = Color3.new(1,1,1), PlaceholderText = placeholder, Text = tostring(defaultVal), Font = Enum.Font.Gotham, Parent = f})
+            styleCard(box, 5)
+            box.FocusLost:Connect(function() callback(box.Text) end)
+            return box
+        end
+
+        createMainField("Playback Speed", "1", config["Speed"..seqIndex], function(t) config["Speed"..seqIndex] = tonumber(t) or 1 end)
+        createMainField("Cut End Time", "0 = auto", config["End"..seqIndex], function(t)
+            local parsed = tonumber(t) or 0
+            config["End"..seqIndex] = parsed
+            if parsed > (config["Time"..seqIndex] or 0) then
+                config["Length"..seqIndex] = math.max(parsed - (config["Time"..seqIndex] or 0), 0)
+            end
+        end)
+        createMainField("Reverse?", "true/false", tostring(config["Reverse"..seqIndex]), function(t)
+            config["Reverse"..seqIndex] = (string.lower(t or "") == "true")
+        end)
+        createMainField("Fade In", "0.08", config["FadeIn"..seqIndex], function(t)
+            config["FadeIn"..seqIndex] = tonumber(t) or 0.08
+        end)
+        createMainField("Fade Out", "0.08", config["FadeOut"..seqIndex], function(t)
+            config["FadeOut"..seqIndex] = tonumber(t) or 0.08
+        end)
+
+        local prevBtn = create("TextButton", {Size = UDim2.new(1,0,0,34), BackgroundColor3 = Color3.fromRGB(28,28,28), TextColor3 = Color3.new(1,1,1), Text = "Play Preview on Viewport", Parent = EditorContainer})
+        styleButton(prevBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+        prevBtn.MouseButton1Click:Connect(function()
+            local d = World:FindFirstChildOfClass("Model")
+            if d and config["Anim"..seqIndex] ~= "" then
+                local animator = getAnimatorFromModel(d)
+                if not animator then
+                    prevBtn.Text = "No Animator Found"
+                    task.delay(1.5, function()
+                        prevBtn.Text = "Play Preview on Viewport"
+                    end)
+                    return
+                end
+
+                for _, prevt in ipairs(animator:GetPlayingAnimationTracks()) do prevt:Stop() end
+                
+                local a = Instance.new("Animation")
+                a.Name = "AntigravityOverride"
+                local previewId = tostring(config["Anim"..seqIndex] or "")
+                local extracted = string.match(previewId, "%d+")
+                if extracted and not string.find(previewId, "rbxassetid://", 1, true) then
+                    previewId = "rbxassetid://" .. extracted
+                end
+                a.AnimationId = previewId
+                local t = animator:LoadAnimation(a)
+                currentPreviewTrack = t
+                local speed = config["Speed"..seqIndex] or 1
+                local isReverse = config["Reverse"..seqIndex] == true
+                local fadeIn = math.max(tonumber(config["FadeIn"..seqIndex]) or 0.08, 0)
+                local fadeOut = math.max(tonumber(config["FadeOut"..seqIndex]) or 0.08, 0)
+                local startTime = config["Time"..seqIndex] or 0
+                local endTime = config["End"..seqIndex] or 0
+                if isReverse and endTime <= 0 then
+                    endTime = t.Length > 0 and t.Length or startTime
+                end
+                if endTime > startTime then
+                    config["Length"..seqIndex] = endTime - startTime
+                end
+
+                t:Play(fadeIn)
+                if isReverse then
+                    t.TimePosition = math.max(endTime, startTime)
+                    t:AdjustSpeed(-math.abs(speed))
+                else
+                    t.TimePosition = startTime
+                    t:AdjustSpeed(math.abs(speed))
+                end
+                local cLen = config["Length"..seqIndex]
+                if cLen and cLen > 0 then
+                    task.delay(cLen, function() if t then t:Stop(fadeOut) end end)
+                end
+            end
+        end)
+    end
+    
+    for seq = 1, MAX_SEQUENCES do
+        createTimeline(seq)
+    end
+
+    createHeader("--- Movement Engine ---", EditorContainer)
+    local dToggle = createField("Dash Forward?", "true/false", tostring(config.DashEnabled), function(t) config.DashEnabled = (t:lower() == "true") end)
+    local dSpeed  = createField("Dash Speed", "50", tostring(config.DashSpeed), function(t) config.DashSpeed = tonumber(t) or 0 end)
+
+    createHeader("--- FE Utilities ---", EditorContainer)
+    local feTools = create("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Parent = EditorContainer })
+    local reverseAllBtn = create("TextButton", {
+        Size = UDim2.new(0.5, -4, 1, 0),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+        Text = "Reverse All Clips",
+        TextColor3 = Color3.new(1, 1, 1),
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        Parent = feTools
+    })
+    styleButton(reverseAllBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+    local testFeBtn = create("TextButton", {
+        Size = UDim2.new(0.5, -4, 1, 0),
+        Position = UDim2.new(0.5, 4, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(28, 28, 28),
+        Text = "Send FE Test",
+        TextColor3 = Color3.new(1, 1, 1),
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        Parent = feTools
+    })
+    styleButton(testFeBtn, Color3.fromRGB(28, 28, 28), Color3.fromRGB(52, 52, 52))
+
+    reverseAllBtn.MouseButton1Click:Connect(function()
+        local turnedOn = false
+        for seq = 1, MAX_SEQUENCES do
+            local key = "Anim"..seq
+            if config[key] and config[key] ~= "" then
+                config["Reverse"..seq] = not (config["Reverse"..seq] == true)
+                if config["Reverse"..seq] then
+                    turnedOn = true
+                end
+            end
+        end
+        reverseAllBtn.Text = turnedOn and "Reverse On" or "Reverse Off"
+        task.delay(1, function() reverseAllBtn.Text = "Reverse All Clips" end)
+    end)
+
+    testFeBtn.MouseButton1Click:Connect(function()
+        local source = StudioState.CurrentAnimSelected or animData.Id
+        playSequenceFE(config, source, function() end)
+        testFeBtn.Text = "Sent"
+        task.delay(1, function() testFeBtn.Text = "Send FE Test" end)
+    end)
+end
+
+local function playCustomSequence(config, onFinished)
+    StudioState.SequenceID = (StudioState.SequenceID or 0) + 1
+    local currentSeq = StudioState.SequenceID
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char:FindFirstChild("Humanoid")
+    if not hrp or not humanoid then return end
+    
+    local animator = humanoid:FindFirstChild("Animator") or humanoid
+    
+    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+        if track.Animation and track.Animation.Name == "AntigravityOverride" then
+            track:Stop()
+        end
+    end
+    
+    task.spawn(function()
+        local ok, err = pcall(function()
+        if config.DashEnabled then
+            local speed = config.DashSpeed or 50
+            local lookVector = hrp.CFrame.LookVector
+            local dir = Vector3.new(lookVector.X, 0, lookVector.Z).Unit
+            local startTime = tick()
+            local conn
+            conn = RunService.Heartbeat:Connect(function()
+                if tick() - startTime >= 0.4 or StudioState.SequenceID ~= currentSeq then 
+                    conn:Disconnect() 
+                    return 
+                end
+                hrp.Velocity = dir * speed
+            end)
+        end
+        
+        local function invokeAnimPhase(seqIndex)
+            if StudioState.SequenceID ~= currentSeq then return false end
+            
+            local aID = config["Anim"..seqIndex]
+            if not aID or aID == "" then return false end
+            
+            local a = Instance.new("Animation")
+            a.Name = "AntigravityOverride"
+            a.AnimationId = aID
+            local t = animator:LoadAnimation(a)
+            t.Looped = false
+            local speed = config["Speed"..seqIndex] or 1
+            local isReverse = config["Reverse"..seqIndex] == true
+            local fadeIn = math.max(tonumber(config["FadeIn"..seqIndex]) or 0.08, 0)
+            local fadeOut = math.max(tonumber(config["FadeOut"..seqIndex]) or 0.08, 0)
+            local startTime = config["Time"..seqIndex] or 0
+            local endTime = config["End"..seqIndex] or 0
+
+            if isReverse and endTime <= 0 then
+                endTime = t.Length > 0 and t.Length or startTime
+            end
+            if endTime > startTime then
+                config["Length"..seqIndex] = endTime - startTime
+            end
+
+            t:Play(fadeIn)
+            if isReverse then
+                t.TimePosition = math.max(endTime, startTime)
+                t:AdjustSpeed(-math.abs(speed))
+            else
+                t.TimePosition = startTime
+                t:AdjustSpeed(math.abs(speed))
+            end
+            
+            local cLen = config["Length"..seqIndex] or 0
+            if cLen > 0 then
+                local eTick = tick() + cLen
+                while tick() < eTick do
+                    if StudioState.SequenceID ~= currentSeq then break end
+                    task.wait(0.01)
+                end
+                if t then t:Stop(fadeOut) end
+            else
+                if t.Length > 0 then
+                    local targetWait = t.Length - t.TimePosition
+                    local eTick = tick() + targetWait
+                    while tick() < eTick do
+                        if StudioState.SequenceID ~= currentSeq then break end
+                        task.wait(0.01)
+                    end
+                    if t then t:Stop(fadeOut) end
+                else
+                    t.Ended:Wait()
+                    if t then t:Stop(fadeOut) end
+                end
+            end
+            
+            return StudioState.SequenceID == currentSeq
+        end
+        
+        for seq = 1, MAX_SEQUENCES do
+            local hasAnim = config["Anim"..seq]
+            if hasAnim and hasAnim ~= "" then
+                local continuePipeline = invokeAnimPhase(seq)
+                if not continuePipeline then
+                    break
+                end
+            end
+        end
+        end)
+
+        if not ok then
+            warn("[Antigravity V4] Sequence execution error:", err)
+        end
+
+        if onFinished then
+            onFinished()
+        end
+    end)
+end
+
+playSequenceFE = function(config, sourceAnimId, onFinished)
+    if SequenceRemote and SequenceRemote:IsA("RemoteEvent") then
+        local ok = pcall(function()
+            SequenceRemote:FireServer(sourceAnimId, config)
+        end)
+        if ok then
+            if onFinished then onFinished() end
+            return
+        end
+    end
+    playCustomSequence(config, onFinished)
+end
+
+local function releaseTriggerLock(animId)
+    if not StudioState.ActiveTriggerLocks then return end
+    StudioState.ActiveTriggerLocks[animId] = nil
+end
+
+local function acquireTriggerLock(animId)
+    StudioState.ActiveTriggerLocks = StudioState.ActiveTriggerLocks or {}
+    StudioState.TriggerLockUntil = StudioState.TriggerLockUntil or {}
+
+    local now = tick()
+    local lockedUntil = StudioState.TriggerLockUntil[animId]
+    if StudioState.ActiveTriggerLocks[animId] or (lockedUntil and now < lockedUntil) then
+        return false
+    end
+
+    StudioState.ActiveTriggerLocks[animId] = true
+    StudioState.TriggerLockUntil[animId] = now + 0.9
+    return true
+end
+
+local function onAnimationPlayed(animTrack)
+    if not animTrack.Animation then return end
+    if animTrack.Animation.Name == "AntigravityOverride" then return end 
+    
+    local rawAnimId = tostring(animTrack.Animation.AnimationId)
+    local extractedId = string.match(rawAnimId, "%d+") or rawAnimId
+    
+    if StudioState.LastPlayedID == extractedId and (tick() - (StudioState.LastPlayedTime or 0)) < 0.4 then
+        return
+    end
+    StudioState.LastPlayedID = extractedId
+    StudioState.LastPlayedTime = tick()
+    
+    local config = StudioState.Overrides[extractedId]
+    
+    if not config then
+        for k, v in pairs(StudioState.Overrides) do
+            if tostring(v.GameId) == extractedId then
+                config = v
+                break
+            end
+        end
+    end
+
+    if config and config.Anim1 and config.Anim1 ~= "" then
+        config = normalizeOverride(extractedId, config)
+        if not acquireTriggerLock(extractedId) then
+            return
+        end
+
+        print("[Antigravity V4] EXECUTION SUCCESS:", extractedId)
+        animTrack:Stop()
+        playSequenceFE(config, extractedId, function()
+            releaseTriggerLock(extractedId)
+        end)
+    end
+end
+
+local function hookCharacter(character)
+    local humanoid = character:WaitForChild("Humanoid", 10)
+    if humanoid then
+        local animator = humanoid:WaitForChild("Animator", 3) or humanoid
+        if StudioState.Connections then StudioState.Connections:Disconnect() end
+        StudioState.Connections = animator.AnimationPlayed:Connect(onAnimationPlayed)
+    end
+end
+
+if LocalPlayer.Character then hookCharacter(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(hookCharacter)
+
+print("Antigravity Animation Studio V4 completely loaded.")
